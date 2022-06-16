@@ -129,7 +129,7 @@ __m256i pack4(ExpandedADCView& view, size_t reg_index, size_t time_index)
   return _mm256_or_si256(or_01, or_23);
 }
 
-void unpack4(__m256i packed, __m256i* output)
+void unpack4(__m256i packed, __m256i* prev,  __m256i* output)
 {
   __m256i masked0 = _mm256_and_si256(packed, _mm256_set1_epi16(0xfu));
   __m256i masked1 = _mm256_and_si256(packed, _mm256_set1_epi16(0xf0u));
@@ -148,10 +148,17 @@ void unpack4(__m256i packed, __m256i* output)
   __m256i subtracted2 = _mm256_sub_epi16(shifted2, offset);
   __m256i subtracted3 = _mm256_sub_epi16(shifted3, offset);
 
-  _mm256_storeu_si256(output + 0, subtracted0);
-  _mm256_storeu_si256(output + 1, subtracted1);
-  _mm256_storeu_si256(output + 2, subtracted2);
-  _mm256_storeu_si256(output + 3, subtracted3);
+  __m256i adc0 = _mm256_add_epi16(subtracted0, _mm256_lddqu_si256(prev));
+  __m256i adc1 = _mm256_add_epi16(subtracted1, adc0);
+  __m256i adc2 = _mm256_add_epi16(subtracted2, adc1);
+  __m256i adc3 = _mm256_add_epi16(subtracted3, adc2);
+
+  _mm256_storeu_si256(prev, adc3);
+  
+  _mm256_storeu_si256(output + 0, adc0);
+  _mm256_storeu_si256(output + 1, adc1);
+  _mm256_storeu_si256(output + 2, adc2);
+  _mm256_storeu_si256(output + 3, adc3);
 }
 
 __m256i pack3(ExpandedADCView& view, size_t reg_index, size_t time_index)
@@ -179,7 +186,7 @@ __m256i pack3(ExpandedADCView& view, size_t reg_index, size_t time_index)
   return _mm256_or_si256(or_01, shifted2);
 }
 
-void unpack3(__m256i packed, __m256i* output)
+void unpack3(__m256i packed,  __m256i* prev, __m256i* output)
 {
   __m256i masked0 = _mm256_and_si256(packed, _mm256_set1_epi16(0x1f));
   __m256i masked1 = _mm256_and_si256(packed, _mm256_set1_epi16(0x1f << 5));
@@ -195,9 +202,15 @@ void unpack3(__m256i packed, __m256i* output)
   __m256i subtracted1 = _mm256_sub_epi16(shifted1, offset);
   __m256i subtracted2 = _mm256_sub_epi16(shifted2, offset);
 
-  _mm256_storeu_si256(output + 0, subtracted0);
-  _mm256_storeu_si256(output + 1, subtracted1);
-  _mm256_storeu_si256(output + 2, subtracted2);
+  __m256i adc0 = _mm256_add_epi16(subtracted0, _mm256_lddqu_si256(prev));
+  __m256i adc1 = _mm256_add_epi16(subtracted1, adc0);
+  __m256i adc2 = _mm256_add_epi16(subtracted2, adc1);
+
+  _mm256_storeu_si256(prev, adc2);
+  
+  _mm256_storeu_si256(output + 0, adc0);
+  _mm256_storeu_si256(output + 1, adc1);
+  _mm256_storeu_si256(output + 2, adc2);
 }
 
 __m256i pack2(ExpandedADCView& view, size_t reg_index, size_t time_index)
@@ -220,7 +233,7 @@ __m256i pack2(ExpandedADCView& view, size_t reg_index, size_t time_index)
   return _mm256_or_si256(shifted0, shifted1);
 }
 
-void unpack2(__m256i packed, __m256i* output)
+void unpack2(__m256i packed, __m256i* prev, __m256i* output)
 {
   __m256i masked0 = _mm256_and_si256(packed, _mm256_set1_epi16(0xff));
   __m256i masked1 = _mm256_and_si256(packed, _mm256_set1_epi16(0xff00));
@@ -233,8 +246,13 @@ void unpack2(__m256i packed, __m256i* output)
   __m256i subtracted0 = _mm256_sub_epi16(shifted0, offset);
   __m256i subtracted1 = _mm256_sub_epi16(shifted1, offset);
 
-  _mm256_storeu_si256(output + 0, subtracted0);
-  _mm256_storeu_si256(output + 1, subtracted1);
+  __m256i adc0 = _mm256_add_epi16(subtracted0, _mm256_lddqu_si256(prev));
+  __m256i adc1 = _mm256_add_epi16(subtracted1, adc0);
+
+  _mm256_storeu_si256(prev, adc1);
+  
+  _mm256_storeu_si256(output + 0, adc0);
+  _mm256_storeu_si256(output + 1, adc1);
 }
 
 // Starting at register `reg_index`, time `time_index` in the `view` object, how many of the next registers can we pack into one?
@@ -299,7 +317,7 @@ main(int argc, char** argv)
   std::string in_filename;
   app.add_option("-i,--input", in_filename, "Input raw WIB file");
 
-  size_t max_n_frames;
+  size_t max_n_frames=std::numeric_limits<size_t>::max();
   app.add_option("-n,--max-n-frames", max_n_frames, "Maximum number of frames to write");
 
   CLI11_PARSE(app, argc, argv);
@@ -336,29 +354,35 @@ main(int argc, char** argv)
   // std::cout << std::endl;
 
   ExpandedADCView view(expanded.data());
-  __m256i prev = view.get_register(0, 0);
-  for (int i=1; i<24; ++i) {
-    __m256i cur = view.get_register(0, i);
-    __m256i diff = _mm256_sub_epi16(cur, prev);
-    print256(diff); printf("\n");
-    prev = cur;
-    if (i%4 == 0) {
-      printf("\n");
-    }
-  }
-  for (int i=0; i<6; ++i) {
-    std::cout << get_n_registers(view, 0, 4*i) << std::endl;
-  }
+  // __m256i prev = view.get_register(0, 0);
+  // for (int i=1; i<24; ++i) {
+  //   __m256i cur = view.get_register(0, i);
+  //   __m256i diff = _mm256_sub_epi16(cur, prev);
+  //   print256(diff); printf("\n");
+  //   prev = cur;
+  //   if (i%4 == 0) {
+  //     printf("\n");
+  //   }
+  // }
+  // for (int i=0; i<6; ++i) {
+  //   std::cout << get_n_registers(view, 0, 4*i) << std::endl;
+  // }
 
   // --------------------------------------------------------
   // Pack one register for testing
-  int ns[400];
-  __m256i packed[400];
 
+  int ns[n_frames]={0};
+  __m256i* packed = new __m256i[n_frames*REGISTERS_PER_FRAME];
+  for (size_t i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) _mm256_storeu_si256(packed+i, _mm256_setzero_si256());
+
+  auto start_pack = steady_clock::now();
+  packed[0] = view.get_register(0, 0);
+  ns[0] = 16; // Magic value for "first time sample in this register"
   size_t t = 0;
-  size_t packed_index = 0;
-  while (t < 300) {
+  size_t packed_index = 1;
+  while (t < n_frames - 4) {
     int n = get_n_registers(view, 0, t);
+    // std::cout << "Packing " << n << " registers starting at time " << t << std::endl;
     ns[packed_index] = n;
     switch (n) {
     case 4:
@@ -371,49 +395,95 @@ main(int argc, char** argv)
       packed[packed_index] = pack2(view, 0, t);
       break;
     case 1:
-      packed[packed_index] = view.get_register(0, t);
+      packed[packed_index] = _mm256_sub_epi16(view.get_register(0, t+1), view.get_register(0, t));
       break;
     }
+    // print256(packed[packed_index]); printf("\n");
     t+=n;
     ++packed_index;
   }
+  // Put the last few samples in the output unchanged
+  while (t < n_frames) {
+    ns[packed_index] = 1;
+    packed[packed_index] = _mm256_sub_epi16(view.get_register(0, t+1), view.get_register(0, t));
+    t += 1;
+    ++packed_index;
+  }
   ns[packed_index] = 0;
-
+  auto end_pack = steady_clock::now();
+  auto dur_pack_ms = duration_cast<milliseconds>(end_pack-start_pack).count();
+  std::cout << "Packed " << n_frames << " frames into " << packed_index << " in " << dur_pack_ms << "ms" << std::endl;
 
   // --------------------------------------------------------
   // Unpack the packed data
 
-  __m256i unpacked[400];
-
-  size_t i = 0;
-  size_t output_time_sample = 0;
+  __m256i* unpacked = new __m256i[n_frames*REGISTERS_PER_FRAME];
+  for (int i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) _mm256_storeu_si256(unpacked+i, _mm256_setzero_si256());
+  
+  // First value is the un-diffed register values
+  __m256i prev = packed[0];
+  _mm256_storeu_si256(unpacked, packed[0]);
+  size_t i = 1;
+  size_t output_time_sample = 1;
   while (ns[i] != 0 ) {
     switch (ns[i]) {
     case 4:
-      unpack4(packed[i], unpacked+output_time_sample);
+      unpack4(packed[i], &prev, unpacked+output_time_sample);
       break;
     case 3:
-      unpack3(packed[i], unpacked+output_time_sample);
+      unpack3(packed[i], &prev, unpacked+output_time_sample);
       break;
     case 2:
-      unpack2(packed[i], unpacked+output_time_sample);
+      unpack2(packed[i], &prev, unpacked+output_time_sample);
       break;
     case 1:
-      _mm256_storeu_si256(unpacked+output_time_sample, packed[i]);
+      // printf("Unpack1\n");
+      // printf("i=%zu packed[i]: ", i); print256(packed[i]); printf("\n");
+      // printf("prev before: "); print256(prev); printf("\n");
+      prev = _mm256_add_epi16(prev, packed[i]);
+      // printf("prev after:  "); print256(prev); printf("\n");
+      _mm256_storeu_si256(unpacked+output_time_sample, prev);
       break;
     }
     output_time_sample += ns[i];
     ++i;
   }
 
-  printf("Unpacked:\n");
-  for (int i=0; i<100; ++i) {
-    print256(unpacked[i]); printf("\n");
+  printf("Original:\n");
+  for (int i=0; i<20; ++i) {
+    printf("t=% 3d: ", i); print256(view.get_register(0, i)); printf("\n");
     if (i%4 == 0) {
       printf("\n");
     }
-
   }
   
+  printf("Unpacked:\n");
+  for (int i=0; i<20; ++i) {
+    printf("t=% 3d: ", i); print256(unpacked[i]); printf("\n");
+    if (i%4 == 0) {
+      printf("\n");
+    }
+  }
+
+  bool passed = true;
+  for (size_t i=0; i<n_frames; ++i) {
+    __m256i orig = view.get_register(0, i);
+    __m256i roundtrip = unpacked[i];
+    __m256i diff = _mm256_sub_epi16(orig, roundtrip);
+    int all_zero = _mm256_testc_si256(_mm256_setzero_si256(), diff);
+    if (!all_zero) {
+      std::cout << "At sample " << i << " orig/roundtrip:" << std::endl;
+      print256(orig); printf("\n");
+      print256(roundtrip); printf("\n");
+      passed = false;
+      break;
+    }
+  }
+  if (passed) {
+    std::cout << "All samples were identical after roundtrip" << std::endl;
+  }
+  
+  delete[] packed;
+  delete[] unpacked;
   return 0;
 }
