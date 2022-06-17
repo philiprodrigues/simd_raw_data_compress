@@ -108,13 +108,13 @@ private:
   size_t m_buffer_size;
 };
 
-inline __m256i pack4(ExpandedADCView& view, size_t reg_index, size_t time_index)
+inline __m256i pack4(__m256i* regs)
 {
-  __m256i reg0 =  view.get_register(reg_index, time_index+0);
-  __m256i reg1 =  view.get_register(reg_index, time_index+1);
-  __m256i reg2 =  view.get_register(reg_index, time_index+2);
-  __m256i reg3 =  view.get_register(reg_index, time_index+3);
-  __m256i reg4 =  view.get_register(reg_index, time_index+4);
+  __m256i reg0 =  regs[0];
+  __m256i reg1 =  regs[1];
+  __m256i reg2 =  regs[2];
+  __m256i reg3 =  regs[3];
+  __m256i reg4 =  regs[4];
   // Adjacent-tick differences
   __m256i diff0 = _mm256_sub_epi16(reg1, reg0);
   __m256i diff1 = _mm256_sub_epi16(reg2, reg1);
@@ -170,12 +170,12 @@ void unpack4(__m256i packed, __m256i* prev,  __m256i* output)
   _mm256_storeu_si256(output + 3, adc3);
 }
 
-inline __m256i pack3(ExpandedADCView& view, size_t reg_index, size_t time_index)
+inline __m256i pack3(__m256i* regs)
 {
-  __m256i reg0 =  view.get_register(reg_index, time_index+0);
-  __m256i reg1 =  view.get_register(reg_index, time_index+1);
-  __m256i reg2 =  view.get_register(reg_index, time_index+2);
-  __m256i reg3 =  view.get_register(reg_index, time_index+3);
+  __m256i reg0 =  regs[0];
+  __m256i reg1 =  regs[1];
+  __m256i reg2 =  regs[2];
+  __m256i reg3 =  regs[3];
   // Adjacent-tick differences
   __m256i diff0 = _mm256_sub_epi16(reg1, reg0);
   __m256i diff1 = _mm256_sub_epi16(reg2, reg1);
@@ -222,11 +222,11 @@ void unpack3(__m256i packed,  __m256i* prev, __m256i* output)
   _mm256_storeu_si256(output + 2, adc2);
 }
 
-inline __m256i pack2(ExpandedADCView& view, size_t reg_index, size_t time_index)
+inline __m256i pack2(__m256i* regs)
 {
-  __m256i reg0 =  view.get_register(reg_index, time_index+0);
-  __m256i reg1 =  view.get_register(reg_index, time_index+1);
-  __m256i reg2 =  view.get_register(reg_index, time_index+2);
+  __m256i reg0 =  regs[0];
+  __m256i reg1 =  regs[1];
+  __m256i reg2 =  regs[2];
   // Adjacent-tick differences
   __m256i diff0 = _mm256_sub_epi16(reg1, reg0);
   __m256i diff1 = _mm256_sub_epi16(reg2, reg1);
@@ -265,14 +265,14 @@ void unpack2(__m256i packed, __m256i* prev, __m256i* output)
 }
 
 // Starting at register `reg_index`, time `time_index` in the `view` object, how many of the next registers can we pack into one?
-inline size_t get_n_registers(ExpandedADCView& view, size_t reg_index, size_t time_index)
+inline size_t get_n_registers(__m256i* regs)
 {
   // The next five registers in time
-  __m256i reg0 =  view.get_register(reg_index, time_index+0);
-  __m256i reg1 =  view.get_register(reg_index, time_index+1);
-  __m256i reg2 =  view.get_register(reg_index, time_index+2);
-  __m256i reg3 =  view.get_register(reg_index, time_index+3);
-  __m256i reg4 =  view.get_register(reg_index, time_index+4);
+  __m256i reg0 =  regs[0];
+  __m256i reg1 =  regs[1];
+  __m256i reg2 =  regs[2];
+  __m256i reg3 =  regs[3];
+  __m256i reg4 =  regs[4];
   // Adjacent-tick differences
   __m256i diff0 = _mm256_sub_epi16(reg1, reg0);
   __m256i diff1 = _mm256_sub_epi16(reg2, reg1);
@@ -326,27 +326,35 @@ size_t pack(ExpandedADCView& view, size_t n_frames, int* ns, __m256i* packed)
   size_t packed_index = 0;
   for (size_t ireg=0; ireg < REGISTERS_PER_FRAME; ++ireg) {
     // printf("ireg=%zu\n", ireg);
+    __m256i regs[5];
     packed[packed_index] = view.get_register(ireg, 0);
     ns[packed_index] = 16; // Magic value for "first time sample in this register"
     size_t t = 0;
     packed_index++;
 
+
     while (t < n_frames - 4) {
-      int n = get_n_registers(view, ireg, t);
+      regs[0] = view.get_register(ireg, t+0);
+      regs[1] = view.get_register(ireg, t+1);
+      regs[2] = view.get_register(ireg, t+2);
+      regs[3] = view.get_register(ireg, t+3);
+      regs[4] = view.get_register(ireg, t+4);
+      
+      int n = get_n_registers(regs);
       // std::cout << "Packing " << n << " registers starting at time " << t << std::endl;
       ns[packed_index] = n;
       switch (n) {
         case 4:
-          packed[packed_index] = pack4(view, ireg, t);
+          packed[packed_index] = pack4(regs);
           break;
         case 3:
-          packed[packed_index] = pack3(view, ireg, t);
+          packed[packed_index] = pack3(regs);
           break;
         case 2:
-          packed[packed_index] = pack2(view, ireg, t);
+          packed[packed_index] = pack2(regs);
           break;
         case 1:
-          packed[packed_index] = _mm256_sub_epi16(view.get_register(ireg, t + 1), view.get_register(ireg, t));
+          packed[packed_index] = _mm256_sub_epi16(regs[1], regs[0]);
           break;
       }
       // print256(packed[packed_index]); printf("\n");
