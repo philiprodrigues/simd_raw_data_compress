@@ -318,75 +318,11 @@ size_t get_n_registers(ExpandedADCView& view, size_t reg_index, size_t time_inde
   return 1;
 }
 
-int
-main(int argc, char** argv)
+// Pack `n_frames` frames of data pointed to by `view` into the
+// `packed` array, storing number-of-registers into the `ns`
+// array. Return the number of registers used in `packed`
+size_t pack(ExpandedADCView& view, size_t n_frames, int* ns, __m256i* packed)
 {
-  CLI::App app{ "Write raw WIB data as HDF5 file in fragment style" };
-
-  std::string in_filename;
-  app.add_option("-i,--input", in_filename, "Input raw WIB file");
-
-  size_t max_n_frames=std::numeric_limits<size_t>::max();
-  app.add_option("-n,--max-n-frames", max_n_frames, "Maximum number of frames to write");
-
-  CLI11_PARSE(app, argc, argv);
-
-  const size_t digitization_freq = 2000000;
-  std::vector<char> uncompressed = read_file(in_filename, max_n_frames);
-  size_t n_frames = uncompressed.size()/frame_size;
-  double data_duration_ms = double(n_frames)/digitization_freq*1000;
-  size_t expanded_size = (256/8)*REGISTERS_PER_FRAME*n_frames;
-  std::vector<char> expanded(expanded_size);
-  WIBFrame* frame = reinterpret_cast<WIBFrame*>(uncompressed.data());
-  std::cout << frame->get_timestamp() << std::endl;
-  size_t expanded_frame_size = 32*REGISTERS_PER_FRAME;
-
-  using namespace std::chrono;
-
-  auto start = steady_clock::now();
-  for (size_t i=0; i<n_frames; ++i) {
-    swtpg::RegisterArray<REGISTERS_PER_FRAME> expanded_frame = swtpg::get_frame_all_adcs(frame);
-    memcpy(expanded.data()+i*expanded_frame_size,
-           expanded_frame.data(),
-           expanded_frame_size);
-    ++frame;
-  }
-  auto end = steady_clock::now();
-  auto dur_ms = duration_cast<milliseconds>(end-start).count();
-  std::cout << "Expanded and copied " << data_duration_ms << "ms of data in " << dur_ms << "ms" << std::endl;
-
-  // uint16_t* adc = reinterpret_cast<uint16_t*>(expanded.data());
-  // for (int i=0; i<1000; ++i) {
-  //   std::cout << (*adc) << " ";
-  //   ++adc;
-  // }
-  // std::cout << std::endl;
-
-  ExpandedADCView view(expanded.data(), expanded.size());
-  // __m256i prev = view.get_register(0, 0);
-  // for (int i=1; i<24; ++i) {
-  //   __m256i cur = view.get_register(0, i);
-  //   __m256i diff = _mm256_sub_epi16(cur, prev);
-  //   print256(diff); printf("\n");
-  //   prev = cur;
-  //   if (i%4 == 0) {
-  //     printf("\n");
-  //   }
-  // }
-  // for (int i=0; i<6; ++i) {
-  //   std::cout << get_n_registers(view, 0, 4*i) << std::endl;
-  // }
-
-  // --------------------------------------------------------
-  // Pack one register for testing
-
-  int* ns = new int[n_frames*REGISTERS_PER_FRAME];
-  __m256i* packed = new __m256i[n_frames*REGISTERS_PER_FRAME];
-  for (size_t i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) {
-    _mm256_storeu_si256(packed+i, _mm256_setzero_si256());
-  }
-  
-  auto start_pack = steady_clock::now();
   size_t packed_index = 0;
   for (size_t ireg=0; ireg < REGISTERS_PER_FRAME; ++ireg) {
     // printf("ireg=%zu\n", ireg);
@@ -426,19 +362,15 @@ main(int argc, char** argv)
     }
   }
   ns[packed_index] = 0;
-  auto end_pack = steady_clock::now();
-  auto dur_pack_ms = duration_cast<milliseconds>(end_pack - start_pack).count();
-  std::cout << "Packed " << n_frames << " frames into " << packed_index << " registers in " << dur_pack_ms << "ms" << std::endl;
 
-  // --------------------------------------------------------
-  // Unpack the packed data
+  return packed_index+1;
+}
 
-  __m256i* unpacked = new __m256i[n_frames * REGISTERS_PER_FRAME];
-  for (int i = 0; i < n_frames * REGISTERS_PER_FRAME; ++i) {
-    _mm256_storeu_si256(unpacked + i, _mm256_setzero_si256());
-  }
-
-  auto start_unpack = steady_clock::now();
+// Unpack the data packed into `packed` and `ns`, representing
+// `n_frames` time samples, into the `unpacked` array. Returns the
+// number of unpacked registers used
+size_t unpack(__m256i* packed, int* ns, size_t n_frames, __m256i* unpacked)
+{
   __m256i prev;
   size_t i = 0;
   size_t output_time_sample = 0;
@@ -478,9 +410,77 @@ main(int argc, char** argv)
     }
     ++i;
   }
+  return i;
+}
+
+int
+main(int argc, char** argv)
+{
+  CLI::App app{ "Write raw WIB data as HDF5 file in fragment style" };
+
+  std::string in_filename;
+  app.add_option("-i,--input", in_filename, "Input raw WIB file");
+
+  size_t max_n_frames=std::numeric_limits<size_t>::max();
+  app.add_option("-n,--max-n-frames", max_n_frames, "Maximum number of frames to write");
+
+  CLI11_PARSE(app, argc, argv);
+
+  const size_t digitization_freq = 2000000;
+  std::vector<char> uncompressed = read_file(in_filename, max_n_frames);
+  size_t n_frames = uncompressed.size()/frame_size;
+  double data_duration_ms = double(n_frames)/digitization_freq*1000;
+  size_t expanded_size = (256/8)*REGISTERS_PER_FRAME*n_frames;
+  std::vector<char> expanded(expanded_size);
+  WIBFrame* frame = reinterpret_cast<WIBFrame*>(uncompressed.data());
+  std::cout << frame->get_timestamp() << std::endl;
+  size_t expanded_frame_size = 32*REGISTERS_PER_FRAME;
+
+  using namespace std::chrono;
+
+  auto start = steady_clock::now();
+  for (size_t i=0; i<n_frames; ++i) {
+    swtpg::RegisterArray<REGISTERS_PER_FRAME> expanded_frame = swtpg::get_frame_all_adcs(frame);
+    memcpy(expanded.data()+i*expanded_frame_size,
+           expanded_frame.data(),
+           expanded_frame_size);
+    ++frame;
+  }
+  auto end = steady_clock::now();
+  auto dur_ms = duration_cast<milliseconds>(end-start).count();
+  std::cout << "Expanded and copied " << data_duration_ms << "ms of data in " << dur_ms << "ms" << std::endl;
+
+  ExpandedADCView view(expanded.data(), expanded.size());
+
+  // --------------------------------------------------------
+  // Pack the data 
+
+  int* ns = new int[n_frames*REGISTERS_PER_FRAME];
+  __m256i* packed = new __m256i[n_frames*REGISTERS_PER_FRAME];
+  for (size_t i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) {
+    _mm256_storeu_si256(packed+i, _mm256_setzero_si256());
+  }
+  
+  auto start_pack = steady_clock::now();
+  size_t n_packed = pack(view, n_frames, ns, packed);
+  auto end_pack = steady_clock::now();
+  auto dur_pack_ms = duration_cast<milliseconds>(end_pack - start_pack).count();
+  std::cout << "Packed " << n_frames << " frames into " << n_packed << " registers in " << dur_pack_ms << "ms" << std::endl;
+
+  // --------------------------------------------------------
+  // Unpack the packed data
+
+  __m256i* unpacked = new __m256i[n_frames * REGISTERS_PER_FRAME];
+  for (int i = 0; i < n_frames * REGISTERS_PER_FRAME; ++i) {
+    _mm256_storeu_si256(unpacked + i, _mm256_setzero_si256());
+  }
+
+  auto start_unpack = steady_clock::now();
+  size_t n_unpacked = unpack(packed, ns, n_frames, unpacked);
   auto end_unpack = steady_clock::now();
   auto dur_unpack_ms = duration_cast<milliseconds>(end_unpack - start_unpack).count();
-  std::cout << "Unpacked " << i << " packed registers in " << dur_unpack_ms << "ms" << std::endl;
+  std::cout << "Unpacked " << n_unpacked << " packed registers in " << dur_unpack_ms << "ms" << std::endl;
+
   // printf("Original:\n");
   // for (int i = 0; i < 20; ++i) {
   //   printf("t=% 3d: ", i);
@@ -502,7 +502,7 @@ main(int argc, char** argv)
   // }
 
   bool passed = true;
-  i=0;
+  size_t i=0;
   for (size_t ireg = 0; ireg < REGISTERS_PER_FRAME; ++ireg) {
     for (size_t itime = 0; itime < n_frames; ++itime) {
       __m256i orig = view.get_register(ireg, itime);
