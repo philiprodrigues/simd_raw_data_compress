@@ -5,6 +5,8 @@
 #include <immintrin.h>
 #include <iostream>
 #include <limits>
+#include <regex>
+#include <stdexcept>
 #include <string>
 
 #include "detdataformats/wib/WIBFrame.hpp"
@@ -85,18 +87,25 @@ void print256(__m256i var)
 class ExpandedADCView
 {
 public:
-  ExpandedADCView(char* buffer)
+  ExpandedADCView(char* buffer, size_t buffer_size)
     : m_buffer(buffer)
+    , m_buffer_size(buffer_size)
   {}
 
   __m256i get_register(size_t reg_index, size_t time_index)
   {
     size_t offset = sizeof(__m256i)*(time_index*REGISTERS_PER_FRAME + reg_index);
+    if(offset >= m_buffer_size) {
+      std::stringstream ss;
+      ss << "reg " << reg_index << " time " << time_index << " offset " << offset << " buffer_size " << m_buffer_size;
+      throw std::runtime_error(ss.str());
+    }
     return _mm256_lddqu_si256(reinterpret_cast<const __m256i*>(m_buffer + offset));
   }
   
 private:
   char* m_buffer;
+  size_t m_buffer_size;
 };
 
 __m256i pack4(ExpandedADCView& view, size_t reg_index, size_t time_index)
@@ -353,7 +362,7 @@ main(int argc, char** argv)
   // }
   // std::cout << std::endl;
 
-  ExpandedADCView view(expanded.data());
+  ExpandedADCView view(expanded.data(), expanded.size());
   // __m256i prev = view.get_register(0, 0);
   // for (int i=1; i<24; ++i) {
   //   __m256i cur = view.get_register(0, i);
@@ -371,70 +380,89 @@ main(int argc, char** argv)
   // --------------------------------------------------------
   // Pack one register for testing
 
-  int ns[n_frames]={0};
+  int* ns = new int[n_frames*REGISTERS_PER_FRAME];
   __m256i* packed = new __m256i[n_frames*REGISTERS_PER_FRAME];
-  for (size_t i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) _mm256_storeu_si256(packed+i, _mm256_setzero_si256());
-
-  auto start_pack = steady_clock::now();
-  packed[0] = view.get_register(0, 0);
-  ns[0] = 16; // Magic value for "first time sample in this register"
-  size_t t = 0;
-  size_t packed_index = 1;
-  while (t < n_frames - 4) {
-    int n = get_n_registers(view, 0, t);
-    // std::cout << "Packing " << n << " registers starting at time " << t << std::endl;
-    ns[packed_index] = n;
-    switch (n) {
-    case 4:
-      packed[packed_index] = pack4(view, 0, t);
-      break;
-    case 3:
-      packed[packed_index] = pack3(view, 0, t);
-      break;
-    case 2:
-      packed[packed_index] = pack2(view, 0, t);
-      break;
-    case 1:
-      packed[packed_index] = _mm256_sub_epi16(view.get_register(0, t+1), view.get_register(0, t));
-      break;
-    }
-    // print256(packed[packed_index]); printf("\n");
-    t+=n;
-    ++packed_index;
+  for (size_t i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) {
+    _mm256_storeu_si256(packed+i, _mm256_setzero_si256());
   }
-  // Put the last few samples in the output unchanged
-  while (t < n_frames) {
-    ns[packed_index] = 1;
-    packed[packed_index] = _mm256_sub_epi16(view.get_register(0, t+1), view.get_register(0, t));
-    t += 1;
-    ++packed_index;
+  
+  auto start_pack = steady_clock::now();
+  size_t packed_index = 0;
+  for (size_t ireg=0; ireg < REGISTERS_PER_FRAME; ++ireg) {
+    // printf("ireg=%zu\n", ireg);
+    packed[packed_index] = view.get_register(ireg, 0);
+    ns[packed_index] = 16; // Magic value for "first time sample in this register"
+    size_t t = 0;
+    packed_index++;
+
+    while (t < n_frames - 4) {
+      int n = get_n_registers(view, ireg, t);
+      // std::cout << "Packing " << n << " registers starting at time " << t << std::endl;
+      ns[packed_index] = n;
+      switch (n) {
+        case 4:
+          packed[packed_index] = pack4(view, ireg, t);
+          break;
+        case 3:
+          packed[packed_index] = pack3(view, ireg, t);
+          break;
+        case 2:
+          packed[packed_index] = pack2(view, ireg, t);
+          break;
+        case 1:
+          packed[packed_index] = _mm256_sub_epi16(view.get_register(ireg, t + 1), view.get_register(ireg, t));
+          break;
+      }
+      // print256(packed[packed_index]); printf("\n");
+      t += n;
+      ++packed_index;
+    }
+    // Put the last few samples in the output unchanged
+    while (t < n_frames - 1) {
+      ns[packed_index] = 1;
+      packed[packed_index] = _mm256_sub_epi16(view.get_register(ireg, t + 1), view.get_register(ireg, t));
+      t += 1;
+      ++packed_index;
+    }
   }
   ns[packed_index] = 0;
   auto end_pack = steady_clock::now();
-  auto dur_pack_ms = duration_cast<milliseconds>(end_pack-start_pack).count();
-  std::cout << "Packed " << n_frames << " frames into " << packed_index << " in " << dur_pack_ms << "ms" << std::endl;
+  auto dur_pack_ms = duration_cast<milliseconds>(end_pack - start_pack).count();
+  std::cout << "Packed " << n_frames << " frames into " << packed_index << " registers in " << dur_pack_ms << "ms" << std::endl;
 
   // --------------------------------------------------------
   // Unpack the packed data
 
-  __m256i* unpacked = new __m256i[n_frames*REGISTERS_PER_FRAME];
-  for (int i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) _mm256_storeu_si256(unpacked+i, _mm256_setzero_si256());
-  
-  // First value is the un-diffed register values
-  __m256i prev = packed[0];
-  _mm256_storeu_si256(unpacked, packed[0]);
-  size_t i = 1;
-  size_t output_time_sample = 1;
-  while (ns[i] != 0 ) {
+  __m256i* unpacked = new __m256i[n_frames * REGISTERS_PER_FRAME];
+  for (int i = 0; i < n_frames * REGISTERS_PER_FRAME; ++i) {
+    _mm256_storeu_si256(unpacked + i, _mm256_setzero_si256());
+  }
+
+  auto start_unpack = steady_clock::now();
+  __m256i prev;
+  size_t i = 0;
+  size_t output_time_sample = 0;
+  size_t output_reg = -1; // The first value we'll receive in `ns` will increment this to 0
+  while (ns[i] != 0) {
+    // std::cout << "i=" << i << ", ns[i]=" << ns[i] << ", output_time_sample=" << output_time_sample << std::endl;
     switch (ns[i]) {
+    case 16:
+
+      ++output_reg;
+      output_time_sample = 0;
+      // First value per register is the un-diffed register values
+      prev = packed[i];
+      _mm256_storeu_si256(unpacked + (n_frames*output_reg + output_time_sample), packed[i]);
+      ++output_time_sample;
+      break;
     case 4:
-      unpack4(packed[i], &prev, unpacked+output_time_sample);
+      unpack4(packed[i], &prev, unpacked + (n_frames*output_reg + output_time_sample));
       break;
     case 3:
-      unpack3(packed[i], &prev, unpacked+output_time_sample);
+      unpack3(packed[i], &prev, unpacked + (n_frames*output_reg + output_time_sample));
       break;
     case 2:
-      unpack2(packed[i], &prev, unpacked+output_time_sample);
+      unpack2(packed[i], &prev, unpacked + (n_frames*output_reg + output_time_sample));
       break;
     case 1:
       // printf("Unpack1\n");
@@ -442,48 +470,65 @@ main(int argc, char** argv)
       // printf("prev before: "); print256(prev); printf("\n");
       prev = _mm256_add_epi16(prev, packed[i]);
       // printf("prev after:  "); print256(prev); printf("\n");
-      _mm256_storeu_si256(unpacked+output_time_sample, prev);
+      _mm256_storeu_si256(unpacked + (n_frames*output_reg + output_time_sample), prev);
       break;
     }
-    output_time_sample += ns[i];
+    if (ns[i] != 16) {
+      output_time_sample += ns[i];
+    }
     ++i;
   }
+  auto end_unpack = steady_clock::now();
+  auto dur_unpack_ms = duration_cast<milliseconds>(end_unpack - start_unpack).count();
+  std::cout << "Unpacked " << i << " packed registers in " << dur_unpack_ms << "ms" << std::endl;
+  // printf("Original:\n");
+  // for (int i = 0; i < 20; ++i) {
+  //   printf("t=% 3d: ", i);
+  //   print256(view.get_register(0, i));
+  //   printf("\n");
+  //   if (i % 4 == 0) {
+  //     printf("\n");
+  //   }
+  // }
 
-  printf("Original:\n");
-  for (int i=0; i<20; ++i) {
-    printf("t=% 3d: ", i); print256(view.get_register(0, i)); printf("\n");
-    if (i%4 == 0) {
-      printf("\n");
-    }
-  }
-  
-  printf("Unpacked:\n");
-  for (int i=0; i<20; ++i) {
-    printf("t=% 3d: ", i); print256(unpacked[i]); printf("\n");
-    if (i%4 == 0) {
-      printf("\n");
-    }
-  }
+  // printf("Unpacked:\n");
+  // for (int i = 0; i < 20; ++i) {
+  //   printf("t=% 3d: ", i);
+  //   print256(unpacked[i]);
+  //   printf("\n");
+  //   if (i % 4 == 0) {
+  //     printf("\n");
+  //   }
+  // }
 
   bool passed = true;
-  for (size_t i=0; i<n_frames; ++i) {
-    __m256i orig = view.get_register(0, i);
-    __m256i roundtrip = unpacked[i];
-    __m256i diff = _mm256_sub_epi16(orig, roundtrip);
-    int all_zero = _mm256_testc_si256(_mm256_setzero_si256(), diff);
-    if (!all_zero) {
-      std::cout << "At sample " << i << " orig/roundtrip:" << std::endl;
-      print256(orig); printf("\n");
-      print256(roundtrip); printf("\n");
-      passed = false;
+  i=0;
+  for (size_t ireg = 0; ireg < REGISTERS_PER_FRAME; ++ireg) {
+    for (size_t itime = 0; itime < n_frames; ++itime) {
+      __m256i orig = view.get_register(ireg, itime);
+      __m256i roundtrip = unpacked[i++];
+      __m256i diff = _mm256_sub_epi16(orig, roundtrip);
+      int all_zero = _mm256_testc_si256(_mm256_setzero_si256(), diff);
+      if (!all_zero) {
+        std::cout << "At sample " << i << " orig/roundtrip:" << std::endl;
+        print256(orig);
+        printf("\n");
+        print256(roundtrip);
+        printf("\n");
+        passed = false;
+        break;
+      }
+    }
+    if (!passed) {
       break;
     }
   }
   if (passed) {
-    std::cout << "All samples were identical after roundtrip" << std::endl;
+    std::cout << "All " << i << " samples were identical after roundtrip" << std::endl;
   }
-  
-  delete[] packed;
-  delete[] unpacked;
+
+  // delete[] packed;
+  // delete[] unpacked;
+  // delete[] ns;
   return 0;
 }
