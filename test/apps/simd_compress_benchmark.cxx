@@ -92,14 +92,14 @@ public:
     , m_buffer_size(buffer_size)
   {}
 
-  __m256i get_register(size_t reg_index, size_t time_index)
+  inline __m256i get_register(size_t reg_index, size_t time_index)
   {
     size_t offset = sizeof(__m256i)*(time_index*REGISTERS_PER_FRAME + reg_index);
-    if(offset >= m_buffer_size) {
-      std::stringstream ss;
-      ss << "reg " << reg_index << " time " << time_index << " offset " << offset << " buffer_size " << m_buffer_size;
-      throw std::runtime_error(ss.str());
-    }
+    // if(offset >= m_buffer_size) {
+    //   std::stringstream ss;
+    //   ss << "reg " << reg_index << " time " << time_index << " offset " << offset << " buffer_size " << m_buffer_size;
+    //   throw std::runtime_error(ss.str());
+    // }
     return _mm256_lddqu_si256(reinterpret_cast<const __m256i*>(m_buffer + offset));
   }
   
@@ -265,7 +265,7 @@ void unpack2(__m256i packed, __m256i* prev, __m256i* output)
 }
 
 // Starting at register `reg_index`, time `time_index` in the `view` object, how many of the next registers can we pack into one?
-size_t get_n_registers(ExpandedADCView& view, size_t reg_index, size_t time_index)
+inline size_t get_n_registers(ExpandedADCView& view, size_t reg_index, size_t time_index)
 {
   // The next five registers in time
   __m256i reg0 =  view.get_register(reg_index, time_index+0);
