@@ -108,7 +108,7 @@ private:
   size_t m_buffer_size;
 };
 
-__m256i pack4(ExpandedADCView& view, size_t reg_index, size_t time_index)
+inline __m256i pack4(ExpandedADCView& view, size_t reg_index, size_t time_index)
 {
   __m256i reg0 =  view.get_register(reg_index, time_index+0);
   __m256i reg1 =  view.get_register(reg_index, time_index+1);
@@ -170,7 +170,7 @@ void unpack4(__m256i packed, __m256i* prev,  __m256i* output)
   _mm256_storeu_si256(output + 3, adc3);
 }
 
-__m256i pack3(ExpandedADCView& view, size_t reg_index, size_t time_index)
+inline __m256i pack3(ExpandedADCView& view, size_t reg_index, size_t time_index)
 {
   __m256i reg0 =  view.get_register(reg_index, time_index+0);
   __m256i reg1 =  view.get_register(reg_index, time_index+1);
@@ -222,7 +222,7 @@ void unpack3(__m256i packed,  __m256i* prev, __m256i* output)
   _mm256_storeu_si256(output + 2, adc2);
 }
 
-__m256i pack2(ExpandedADCView& view, size_t reg_index, size_t time_index)
+inline __m256i pack2(ExpandedADCView& view, size_t reg_index, size_t time_index)
 {
   __m256i reg0 =  view.get_register(reg_index, time_index+0);
   __m256i reg1 =  view.get_register(reg_index, time_index+1);
