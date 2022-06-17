@@ -332,29 +332,53 @@ size_t pack(ExpandedADCView& view, size_t n_frames, int* ns, __m256i* packed)
     size_t t = 0;
     packed_index++;
 
+    regs[0] = view.get_register(ireg, t+0);
+    regs[1] = view.get_register(ireg, t+1);
+    regs[2] = view.get_register(ireg, t+2);
+    regs[3] = view.get_register(ireg, t+3);
+    regs[4] = view.get_register(ireg, t+4);
 
     while (t < n_frames - 4) {
-      regs[0] = view.get_register(ireg, t+0);
-      regs[1] = view.get_register(ireg, t+1);
-      regs[2] = view.get_register(ireg, t+2);
-      regs[3] = view.get_register(ireg, t+3);
-      regs[4] = view.get_register(ireg, t+4);
       
       int n = get_n_registers(regs);
       // std::cout << "Packing " << n << " registers starting at time " << t << std::endl;
       ns[packed_index] = n;
+      // Tried moving this bit inside get_n_registers, but it doesn't
+      // seem to speed things up at all, and makes the code a little
+      // less nice, so reverted
       switch (n) {
         case 4:
           packed[packed_index] = pack4(regs);
+          regs[0] = regs[4];
+          regs[1] = view.get_register(ireg, t+n+1);
+          regs[2] = view.get_register(ireg, t+n+2);
+          regs[3] = view.get_register(ireg, t+n+3);
+          regs[4] = view.get_register(ireg, t+n+4);    
           break;
         case 3:
           packed[packed_index] = pack3(regs);
+          regs[0] = regs[3];
+          regs[1] = regs[4];
+          regs[2] = view.get_register(ireg, t+n+2);
+          regs[3] = view.get_register(ireg, t+n+3);
+          regs[4] = view.get_register(ireg, t+n+4);    
+
           break;
         case 2:
           packed[packed_index] = pack2(regs);
+          regs[0] = regs[2];
+          regs[1] = regs[3];
+          regs[2] = regs[4];
+          regs[3] = view.get_register(ireg, t+n+3);
+          regs[4] = view.get_register(ireg, t+n+4);    
           break;
         case 1:
           packed[packed_index] = _mm256_sub_epi16(regs[1], regs[0]);
+          regs[0] = regs[1];
+          regs[1] = regs[2];
+          regs[2] = regs[3];
+          regs[3] = regs[4];
+          regs[4] = view.get_register(ireg, t+n+4);    
           break;
       }
       // print256(packed[packed_index]); printf("\n");
