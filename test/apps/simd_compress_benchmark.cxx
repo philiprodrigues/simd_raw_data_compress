@@ -41,7 +41,9 @@ std::vector<char> read_file(std::string filename, size_t max_n_frames=std::numer
   }
   size_t n_file_frames = length / frame_size;
   size_t n_frames = std::min(n_file_frames, max_n_frames);
-
+  // Round down to the nearest multiple of 12 so we only get complete superchunks
+  n_frames = (n_frames/12)*12;
+  
   size_t read_length = n_frames * frame_size;
   std::cout << "There are " << n_file_frames << " frames in the file. Running on " << n_frames << std::endl;
   size_t size = n_frames * frame_size;
@@ -334,6 +336,7 @@ size_t pack(ExpandedADCView& view, size_t n_frames, int* ns, __m256i* packed)
 
 
     while (t < n_frames - 4) {
+      // printf("t=%zu\n", t);
       regs[0] = view.get_register(ireg, t+0);
       regs[1] = view.get_register(ireg, t+1);
       regs[2] = view.get_register(ireg, t+2);
@@ -369,9 +372,9 @@ size_t pack(ExpandedADCView& view, size_t n_frames, int* ns, __m256i* packed)
       ++packed_index;
     }
   }
-  ns[packed_index] = 0;
+  // ns[packed_index] = 0;
 
-  return packed_index+1;
+  return packed_index;
 }
 
 // Unpack the data packed into `packed` and `ns`, representing
@@ -383,11 +386,12 @@ size_t unpack(__m256i* packed, int* ns, size_t n_frames, __m256i* unpacked)
   size_t i = 0;
   size_t output_time_sample = 0;
   size_t output_reg = -1; // The first value we'll receive in `ns` will increment this to 0
-  while (ns[i] != 0) {
-    // std::cout << "i=" << i << ", ns[i]=" << ns[i] << ", output_time_sample=" << output_time_sample << std::endl;
+  if (ns[i] == 0) {
+    return 0;
+  }
+  while (output_time_sample < 12) {
     switch (ns[i]) {
     case 16:
-
       ++output_reg;
       output_time_sample = 0;
       // First value per register is the un-diffed register values
@@ -412,6 +416,8 @@ size_t unpack(__m256i* packed, int* ns, size_t n_frames, __m256i* unpacked)
       // printf("prev after:  "); print256(prev); printf("\n");
       _mm256_storeu_si256(unpacked + (n_frames*output_reg + output_time_sample), prev);
       break;
+    default:
+      std::cout << "Got value " << ns[i] << " in ns[" << i << "]" << std::endl;
     }
     if (ns[i] != 16) {
       output_time_sample += ns[i];
@@ -434,109 +440,160 @@ main(int argc, char** argv)
 
   CLI11_PARSE(app, argc, argv);
 
+  constexpr size_t expanded_frame_size = 32*REGISTERS_PER_FRAME;
+  constexpr size_t expanded_superchunk_size = 12*expanded_frame_size;
+
   const size_t digitization_freq = 2000000;
   std::vector<char> uncompressed = read_file(in_filename, max_n_frames);
   size_t n_frames = uncompressed.size()/frame_size;
+  size_t n_registers_unpacked = n_frames*REGISTERS_PER_FRAME;
   double data_duration_ms = double(n_frames)/digitization_freq*1000;
-  size_t expanded_size = (256/8)*REGISTERS_PER_FRAME*n_frames;
+  size_t expanded_size = (256/8)*n_registers_unpacked;
+  
   std::vector<char> expanded(expanded_size);
   WIBFrame* frame = reinterpret_cast<WIBFrame*>(uncompressed.data());
-  std::cout << frame->get_timestamp() << std::endl;
-  size_t expanded_frame_size = 32*REGISTERS_PER_FRAME;
+  // std::cout << frame->get_timestamp() << std::endl;
+  int* ns = new int[n_frames*REGISTERS_PER_FRAME];
+  for (size_t i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) {
+    ns[i] = -1;
+  }
+  __m256i* packed = new __m256i[n_frames*REGISTERS_PER_FRAME];
+  for (size_t i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) {
+    _mm256_storeu_si256(packed+i, _mm256_set1_epi16(-1));
+  }
+
 
   using namespace std::chrono;
 
   auto start = steady_clock::now();
+  char* start_of_expanded_superchunk = expanded.data();
+  size_t n_packed_total = 0;
   for (size_t i=0; i<n_frames; ++i) {
     swtpg::RegisterArray<REGISTERS_PER_FRAME> expanded_frame = swtpg::get_frame_all_adcs(frame);
     memcpy(expanded.data()+i*expanded_frame_size,
            expanded_frame.data(),
            expanded_frame_size);
     ++frame;
+    if ((i + 1) % 12 == 0) {
+
+      ExpandedADCView view(start_of_expanded_superchunk, expanded_superchunk_size);
+      size_t n_packed = pack(view, 12, ns + n_packed_total, packed + n_packed_total);
+      n_packed_total += n_packed;
+      start_of_expanded_superchunk += expanded_superchunk_size;
+      // std::cout << "i=" << i << " n_packed=" << n_packed << " n_packed_total=" << n_packed_total << std::endl;
+    }
   }
+  ns[n_packed_total] = 0; // End of data
   auto end = steady_clock::now();
   auto dur_ms = duration_cast<milliseconds>(end-start).count();
-  std::cout << "Expanded and copied " << data_duration_ms << "ms of data in " << dur_ms << "ms" << std::endl;
+  float compression_factor = float(n_registers_unpacked)/n_packed_total;
+  std::cout << "Expanded, copied and packed " << data_duration_ms << "ms of data (" << n_registers_unpacked << " registers) in " << dur_ms << "ms into " << n_packed_total << " registers. Compression factor " << compression_factor << std::endl;
 
-  ExpandedADCView view(expanded.data(), expanded.size());
+
 
   // --------------------------------------------------------
   // Pack the data 
-
-  int* ns = new int[n_frames*REGISTERS_PER_FRAME];
-  __m256i* packed = new __m256i[n_frames*REGISTERS_PER_FRAME];
-  for (size_t i=0; i<n_frames*REGISTERS_PER_FRAME; ++i) {
-    _mm256_storeu_si256(packed+i, _mm256_setzero_si256());
-  }
   
-  auto start_pack = steady_clock::now();
-  size_t n_packed = pack(view, n_frames, ns, packed);
-  auto end_pack = steady_clock::now();
-  auto dur_pack_ms = duration_cast<milliseconds>(end_pack - start_pack).count();
-  std::cout << "Packed " << n_frames << " frames into " << n_packed << " registers in " << dur_pack_ms << "ms" << std::endl;
+  // auto start_pack = steady_clock::now();
+
+  // auto end_pack = steady_clock::now();
+  // auto dur_pack_ms = duration_cast<milliseconds>(end_pack - start_pack).count();
+  // std::cout << "Packed " << n_frames << " frames into " << n_packed << " registers in " << dur_pack_ms << "ms" << std::endl;
 
   // --------------------------------------------------------
   // Unpack the packed data
 
   __m256i* unpacked = new __m256i[n_frames * REGISTERS_PER_FRAME];
-  for (int i = 0; i < n_frames * REGISTERS_PER_FRAME; ++i) {
+  for (size_t i = 0; i < n_frames * REGISTERS_PER_FRAME; ++i) {
     _mm256_storeu_si256(unpacked + i, _mm256_setzero_si256());
   }
 
   auto start_unpack = steady_clock::now();
-  size_t n_unpacked = unpack(packed, ns, n_frames, unpacked);
+  size_t packed_index = 0;
+  size_t iframe = 0;
+  while (packed_index < n_packed_total) {
+    //for (size_t iframe = 0; iframe < n_frames; ++iframe){
+    size_t output_offset = iframe*12;
+    size_t n_unpacked = unpack(packed + packed_index,
+                               ns + packed_index,
+                               12,
+                               unpacked + output_offset);
+    if (n_unpacked == 0) break; // End of data
+    packed_index += n_unpacked;
+    // std::cout << "iframe=" << iframe << " n_unpacked = " << n_unpacked << " packed_index = " << packed_index  << " n_packed_total = " << n_packed_total << std::endl;
+    ++iframe;
+  }
   auto end_unpack = steady_clock::now();
   auto dur_unpack_ms = duration_cast<milliseconds>(end_unpack - start_unpack).count();
-  std::cout << "Unpacked " << n_unpacked << " packed registers in " << dur_unpack_ms << "ms" << std::endl;
+  std::cout << "Unpacked " << packed_index << " packed registers in " << dur_unpack_ms << "ms" << std::endl;
 
-  // printf("Original:\n");
-  // for (int i = 0; i < 20; ++i) {
-  //   printf("t=% 3d: ", i);
-  //   print256(view.get_register(0, i));
-  //   printf("\n");
-  //   if (i % 4 == 0) {
-  //     printf("\n");
-  //   }
-  // }
-
-  // printf("Unpacked:\n");
-  // for (int i = 0; i < 20; ++i) {
-  //   printf("t=% 3d: ", i);
-  //   print256(unpacked[i]);
-  //   printf("\n");
-  //   if (i % 4 == 0) {
-  //     printf("\n");
-  //   }
-  // }
-
-  bool passed = true;
-  size_t i=0;
-  for (size_t ireg = 0; ireg < REGISTERS_PER_FRAME; ++ireg) {
-    for (size_t itime = 0; itime < n_frames; ++itime) {
-      __m256i orig = view.get_register(ireg, itime);
-      __m256i roundtrip = unpacked[i++];
-      __m256i diff = _mm256_sub_epi16(orig, roundtrip);
-      int all_zero = _mm256_testc_si256(_mm256_setzero_si256(), diff);
-      if (!all_zero) {
-        std::cout << "At sample " << i << " orig/roundtrip:" << std::endl;
-        print256(orig);
-        printf("\n");
-        print256(roundtrip);
-        printf("\n");
-        passed = false;
-        break;
-      }
+  ExpandedADCView view(expanded.data(), expanded.size());
+  
+  printf("Original:\n");
+  for (size_t i = 0; i < std::min(40ul, n_frames); ++i) {
+    printf("t=% 3zu: ", i);
+    __m256i reg = _mm256_lddqu_si256((__m256i*)(expanded.data() + i*sizeof(__m256i)));
+    // print256(view.get_register(0, i));
+    print256(reg);
+    printf("\n");
+    if (i % 4 == 0) {
+      printf("\n");
     }
-    if (!passed) {
+  }
+
+  printf("Unpacked:\n");
+  for (size_t i = 0; i < std::min(40ul, n_frames); ++i) {
+    printf("t=% 3zu: ", i);
+    print256(unpacked[i]);
+    printf("\n");
+    if (i % 4 == 0) {
+      printf("\n");
+    }
+  }
+
+  printf("Packed:\n");
+  for (size_t i = 0; i < std::min(40ul, n_packed_total); ++i) {
+    printf("t=% 3zu: ", i);
+    print256(packed[i]);
+    printf("\n");
+    if (i % 4 == 0) {
+      printf("\n");
+    }
+  }
+
+  // printf("ns:\n");
+  // for (size_t i = 0; i < std::min(200ul, n_frames*REGISTERS_PER_FRAME); ++i) {
+  //   printf("ns[% 3d]=% 2d\n", i, ns[i]);
+  // }
+  // printf("\n");
+  
+  bool passed = true;
+
+  for (size_t i = 0; i < n_frames*REGISTERS_PER_FRAME; ++i) {
+    size_t ireg = i % REGISTERS_PER_FRAME;
+    size_t itime = i / REGISTERS_PER_FRAME;
+    __m256i orig = _mm256_lddqu_si256((__m256i*)(expanded.data() + i*sizeof(__m256i)));
+    size_t roundtrip_index = (itime/12)*(12*REGISTERS_PER_FRAME) + ireg*12 + (itime % 12);
+    __m256i roundtrip = unpacked[roundtrip_index];
+    __m256i diff = _mm256_sub_epi16(orig, roundtrip);
+    int all_zero = _mm256_testc_si256(_mm256_setzero_si256(), diff);
+    if (!all_zero) {
+      std::cout << "At sample " << i << " orig/roundtrip:" << std::endl;
+      print256(orig);
+      printf("\n");
+      print256(roundtrip);
+      printf("\n");
+      passed = false;
       break;
     }
   }
+
   if (passed) {
-    std::cout << "All " << i << " samples were identical after roundtrip" << std::endl;
+    std::cout << "All " << (n_frames*REGISTERS_PER_FRAME) << " samples were identical after roundtrip" << std::endl;
   }
 
-  // delete[] packed;
-  // delete[] unpacked;
-  // delete[] ns;
+  delete[] packed;
+  delete[] unpacked;
+  delete[] ns;
   return 0;
 }
